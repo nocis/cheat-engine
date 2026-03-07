@@ -1,4 +1,4 @@
-name: Windows Build and Upload
+name: Windows Full Build and Upload
 
 on:
   workflow_dispatch:
@@ -13,6 +13,9 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    - name: Add MSBuild to Path
+      uses: microsoft/setup-msbuild@v2
 
     - name: Install Lazarus
       uses: gcarreno/setup-lazarus@v3
@@ -29,21 +32,27 @@ jobs:
         Start-Process -FilePath ".\lazarus-cross-installer.exe" -ArgumentList "/VERYSILENT /SP- /DIR=$lazDir" -Wait
       shell: pwsh
       
-    - name: Rename UI Strings and Find Path
+    - name: Find Project Path and Rename UI
       run: |
-        # 1. Automatically find where the project folder is
+        # 1. Locate the project folder
         $lpiFile = Get-ChildItem -Recurse -Filter "cheatengine.lpi" | Select-Object -First 1
-        $path = $lpiFile.Directory.FullName
-        Echo "PROJECT_DIR=$path" >> $env:GITHUB_ENV
+        if ($null -eq $lpiFile) {
+            $path = $ExecutionActionPreference = "Continue"; $pwd.Path # Fallback to root
+        } else {
+            $path = $lpiFile.Directory.FullName
+        }
+        
+        # 2. Set the environment variable properly for GitHub Actions
+        "PROJECT_DIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
+        Write-Host "Project Directory set to: $path"
 
-        # 2. Replace UI Strings (Text with spaces is safe to change)
-        # This changes the Title Bar and Menu items
+        # 3. Replace UI Strings
         $replacements = @{
             "Cheat Engine 7.6" = "LLL ABX"
             "Cheat Engine"     = "Nocis Happy Tool"
         }
 
-        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr" | ForEach-Object {
+        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr", "*.sln" | ForEach-Object {
             $content = Get-Content $_.FullName -Raw
             foreach ($old in $replacements.Keys) {
                 $content = $content -replace [regex]::Escape($old), $replacements[$old]
@@ -51,30 +60,75 @@ jobs:
             Set-Content $_.FullName $content
         }
       shell: pwsh
-    
-    - name: Build CheatEngine (64-Bit)
+
+    - name: Build Pascal Components (Lazarus)
       run: |
-        lazbuild.exe "${{ env.PROJECT_DIR }}\cheatengine.lpi" --build-mode="Release 64-Bit"
+        # Use the env variable we just created
+        $ce = "${{ env.PROJECT_DIR }}"
+        
+        lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
+        lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
+        
+        if (Test-Path "$ce\luaclient\luaclient.lpi") {
+          lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 64-Bit"
+          lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 32-Bit"
+        }
+        
+        if (Test-Path "$ce\speedhack\speedhack.lpi") {
+          lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 64-Bit"
+          lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 32-Bit"
+        }
+
+        if (Test-Path "$ce\vehdebug\vehdebug.lpi") {
+          lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 64-Bit"
+          lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 32-Bit"
+        }
       shell: cmd
 
-    - name: Build CheatEngine (32-Bit)
+    - name: Build C++ Components (MSBuild)
       run: |
-        lazbuild.exe "${{ env.PROJECT_DIR }}\cheatengine.lpi" --build-mode="Release 32-Bit"
-      shell: cmd
+        $ce = "${{ env.PROJECT_DIR }}"
+        $solutions = @(
+          "DirectXMess\DirectXMess.sln",
+          "DotNetCompiler\DotNetCompiler.sln",
+          "MonoDataCollector\MonoDataCollector.sln",
+          "DotNetDataCollector\DotNetDataCollector.sln",
+          "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln",
+          "cejvmti\cejvmti.sln",
+          "tcclib\tcclib.sln"
+        )
 
-    - name: Rename Compiled Exe and Patch
+        foreach ($sln in $solutions) {
+          $slnPath = Join-Path $ce $sln
+          if (Test-Path $slnPath) {
+            Write-Host "Building $sln..."
+            msbuild.exe $slnPath /p:Configuration=Release /p:Platform=x64
+            msbuild.exe $slnPath /p:Configuration=Release /p:Platform=Win32
+          }
+        }
+      shell: pwsh
+
+    - name: Build DBK Kernel Driver
       run: |
-        # 1. Move to the bin folder
-        $binPath = "${{ env.PROJECT_DIR }}\bin"
+        $dbkPath = Join-Path "${{ env.PROJECT_DIR }}" "dbkkernel\dbkkernel.sln"
+        if (Test-Path $dbkPath) {
+           msbuild.exe $dbkPath /p:Configuration="Release No-Sig" /p:Platform=x64
+        }
+      shell: pwsh
+
+    - name: Rename Main EXEs and Binary Patch
+      run: |
+        $binPath = Join-Path "${{ env.PROJECT_DIR }}" "bin"
+        if (-not (Test-Path $binPath)) { Write-Error "Bin folder not found!"; exit 1 }
         cd $binPath
 
-        # 2. Rename the actual .exe files so they don't say "cheatengine"
-        Get-ChildItem -Filter "*.exe" | ForEach-Object {
+        # 1. Rename EXEs
+        Get-ChildItem -Filter "cheatengine*.exe" | ForEach-Object {
             $newName = $_.Name -replace "cheatengine", "nocishappytool"
             Rename-Item $_.FullName $newName
         }
 
-        # 3. Apply the Byte-Patch to the renamed exe files
+        # 2. Binary Patch Strings
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
             $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
@@ -99,22 +153,21 @@ jobs:
             $data = [System.IO.File]::ReadAllBytes($_.FullName)
             $data = Replace-Bytes -Bytes $data -OldStr "Cheat Engine" -NewStr "Nocis Happy Tool"
             [System.IO.File]::WriteAllBytes($_.FullName, $data)
-            Write-Host "Patched internal strings in: $($_.Name)"
         }
       shell: pwsh
       
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Compiled-Binaries
+        name: Full-Compiled-Binaries
         path: ${{ env.PROJECT_DIR }}/bin/
 
     - name: Create Release
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-          $binPath = "${{ env.PROJECT_DIR }}\bin\*"
-          7z a nocishappytool-build.zip $binPath
+          $binFiles = Join-Path "${{ env.PROJECT_DIR }}" "bin\*"
+          7z a nocishappytool-full.zip $binFiles
           $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-build.zip --title "Build $tag" --notes "Automated build of Nocis Happy Tool."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag (Full)" --notes "Automated full build with all collectors and drivers."
       shell: pwsh
