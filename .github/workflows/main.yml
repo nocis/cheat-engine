@@ -34,19 +34,10 @@ jobs:
       
     - name: Find Project Path and Rename UI
       run: |
-        # 1. Locate the project folder
         $lpiFile = Get-ChildItem -Recurse -Filter "cheatengine.lpi" | Select-Object -First 1
-        if ($null -eq $lpiFile) {
-            $path = $ExecutionActionPreference = "Continue"; $pwd.Path # Fallback to root
-        } else {
-            $path = $lpiFile.Directory.FullName
-        }
-        
-        # 2. Set the environment variable properly for GitHub Actions
+        if ($null -eq $lpiFile) { $path = $pwd.Path } else { $path = $lpiFile.Directory.FullName }
         "PROJECT_DIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
-        Write-Host "Project Directory set to: $path"
 
-        # 3. Replace UI Strings
         $replacements = @{
             "Cheat Engine 7.6" = "Nocis Happy Tool 7.6"
             "Cheat Engine"     = "Nocis Happy Tool"
@@ -63,31 +54,35 @@ jobs:
 
     - name: Build Pascal Components (Lazarus)
       run: |
-        # Use the env variable we just created
-        $ce = "${{ env.PROJECT_DIR }}"
+        # In PWSH, we use $env:PROJECT_DIR
+        $ce = $env:PROJECT_DIR
         
-        lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
-        lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
+        Write-Host "Building Main App..."
+        & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
+        & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
         
         if (Test-Path "$ce\luaclient\luaclient.lpi") {
-          lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 64-Bit"
-          lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 32-Bit"
+          Write-Host "Building LuaClient..."
+          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 64-Bit"
+          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 32-Bit"
         }
         
         if (Test-Path "$ce\speedhack\speedhack.lpi") {
-          lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 64-Bit"
-          lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 32-Bit"
+          Write-Host "Building Speedhack..."
+          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 64-Bit"
+          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 32-Bit"
         }
 
         if (Test-Path "$ce\vehdebug\vehdebug.lpi") {
-          lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 64-Bit"
-          lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 32-Bit"
+          Write-Host "Building VEHDebug..."
+          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 64-Bit"
+          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 32-Bit"
         }
-      shell: cmd
+      shell: pwsh
 
     - name: Build C++ Components (MSBuild)
       run: |
-        $ce = "${{ env.PROJECT_DIR }}"
+        $ce = $env:PROJECT_DIR
         $solutions = @(
           "DirectXMess\DirectXMess.sln",
           "DotNetCompiler\DotNetCompiler.sln",
@@ -101,7 +96,7 @@ jobs:
         foreach ($sln in $solutions) {
           $slnPath = Join-Path $ce $sln
           if (Test-Path $slnPath) {
-            Write-Host "Building $sln..."
+            Write-Host "Building solution: $sln"
             msbuild.exe $slnPath /p:Configuration=Release /p:Platform=x64
             msbuild.exe $slnPath /p:Configuration=Release /p:Platform=Win32
           }
@@ -110,7 +105,7 @@ jobs:
 
     - name: Build DBK Kernel Driver
       run: |
-        $dbkPath = Join-Path "${{ env.PROJECT_DIR }}" "dbkkernel\dbkkernel.sln"
+        $dbkPath = Join-Path $env:PROJECT_DIR "dbkkernel\dbkkernel.sln"
         if (Test-Path $dbkPath) {
            msbuild.exe $dbkPath /p:Configuration="Release No-Sig" /p:Platform=x64
         }
@@ -118,8 +113,8 @@ jobs:
 
     - name: Rename Main EXEs and Binary Patch
       run: |
-        $binPath = Join-Path "${{ env.PROJECT_DIR }}" "bin"
-        if (-not (Test-Path $binPath)) { Write-Error "Bin folder not found!"; exit 1 }
+        $binPath = Join-Path $env:PROJECT_DIR "bin"
+        if (-not (Test-Path $binPath)) { throw "Bin folder not found" }
         cd $binPath
 
         # 1. Rename EXEs
@@ -128,7 +123,7 @@ jobs:
             Rename-Item $_.FullName $newName
         }
 
-        # 2. Binary Patch Strings
+        # 2. Binary Patch
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
             $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
@@ -166,8 +161,8 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-          $binFiles = Join-Path "${{ env.PROJECT_DIR }}" "bin\*"
+          $binFiles = Join-Path $env:PROJECT_DIR "bin\*"
           7z a nocishappytool-full.zip $binFiles
           $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag (Full)" --notes "Automated full build with all collectors and drivers."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag (Full)" --notes "Automated full build."
       shell: pwsh
