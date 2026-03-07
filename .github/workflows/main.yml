@@ -48,7 +48,7 @@ jobs:
 
         # 3. Replace UI Strings
         $replacements = @{
-            "Cheat Engine 7.6" = "LLL ABX"
+            "Cheat Engine 7.6" = "Nocis Happy Tool 7.6"
             "Cheat Engine"     = "Nocis Happy Tool"
         }
 
