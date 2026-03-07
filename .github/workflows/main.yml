@@ -49,15 +49,15 @@ jobs:
         Write-Host "Installation successful."
       shell: pwsh
       
-    - name: Rename Project and Strings (Safe Version)
+    - name: Rename Project and Strings
       run: |
         $newName = "nocishappytool"
+        # Determine the correct path
         $path = "Cheat Engine"
         if (-not (Test-Path $path)) { $path = "cheat-engine/Cheat Engine" }
+        Write-Host "Working in path: $path"
 
-        # 1. Define specific replacements
-        # We only replace "Cheat Engine" (with space) to change the UI labels
-        # We avoid replacing "CheatEngine" (no space) globally to prevent breaking Lua functions
+        # 1. Replace UI Strings (The safe ones with spaces)
         $replacements = @{
             "Cheat Engine 7.6" = "LLL ABX"
             "Cheat Engine"     = "XXX Abs"
@@ -72,11 +72,28 @@ jobs:
             Set-Content $file $content
         }
 
-        # 2. Rename the project files ONLY
-        # This allows the compiler to create "nocishappytool.exe" without breaking the internal code
-        Write-Host "Renaming physical project files..."
-        if (Test-Path "$path/cheatengine.lpi") { Rename-Item "$path/cheatengine.lpi" "$newName.lpi" }
-        if (Test-Path "$path/cheatengine.lpr") { Rename-Item "$path/cheatengine.lpr" "$newName.lpr" }
+        # 2. PHYSICALLY RENAME the project files
+        Write-Host "Renaming physical files..."
+        Rename-Item "$path/cheatengine.lpi" "$newName.lpi"
+        Rename-Item "$path/cheatengine.lpr" "$newName.lpr"
+
+        # 3. CRITICAL: Update the internal XML inside the .lpi file
+        # This tells Lazarus that the main file is now 'nocishappytool.lpr' instead of 'cheatengine.lpr'
+        Write-Host "Updating project internal references..."
+        $lpiFile = "$path/$newName.lpi"
+        $lpiContent = Get-Content $lpiFile -Raw
+        
+        # This replaces the main source file reference
+        $lpiContent = $lpiContent -replace 'Filename="cheatengine.lpr"', "Filename=""$newName.lpr"""
+        
+        # This replaces the project title
+        $lpiContent = $lpiContent -replace '<Title Value="cheatengine"/>', "<Title Value=""$newName""/>"
+        
+        # This fixes the output .exe names inside the project settings
+        $lpiContent = $lpiContent -replace 'cheatengine-x86_64', "$newName-x86_64"
+        $lpiContent = $lpiContent -replace 'cheatengine-i386', "$newName-i386"
+        
+        Set-Content $lpiFile $lpiContent
       shell: pwsh
     
     - name: Build CheatEngine (64-Bit)
