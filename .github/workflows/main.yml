@@ -1,0 +1,154 @@
+name: Windows Build and Upload
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Lazarus
+      uses: gcarreno/setup-lazarus@v3
+      with:
+        lazarus-version: "2.2.2"
+        with-cache: true
+
+    - name: Download and Install Lazarus i386 Cross-Compiler
+      run: |
+        # 1. Dynamically find where Lazarus is currently installed
+        $lazbuildPath = (Get-Command lazbuild.exe).Source
+        $lazDir = Split-Path -Parent $lazbuildPath
+        Write-Host "Lazarus is installed at: $lazDir"
+
+        # 2. Download the installer
+        $url = "https://downloads.sourceforge.net/project/lazarus/Lazarus%20Windows%2064%20bits/Lazarus%202.2.2/lazarus-2.2.2-fpc-3.2.2-cross-i386-win32-win64.exe"
+        Write-Host "Downloading cross-compiler..."
+        curl.exe -L -o "lazarus-cross-installer.exe" $url
+        
+        # 3. Check file size
+        if ((Get-Item "lazarus-cross-installer.exe").Length -lt 40MB) {
+            Write-Error "Download failed: File too small."
+            exit 1
+        }
+        
+        # 4. Install into the EXACT directory found in step 1
+        Write-Host "Installing cross-compiler into $lazDir ..."
+        $process = Start-Process -FilePath ".\lazarus-cross-installer.exe" -ArgumentList "/VERYSILENT /SP- /DIR=$lazDir" -Wait -PassThru
+        
+        if ($process.ExitCode -ne 0) {
+            Write-Error "Installer failed with exit code $($process.ExitCode)"
+            exit 1
+        }
+        Write-Host "Installation successful."
+      shell: pwsh
+      
+    - name: Rename Project and Strings
+      run: |
+        # 1. Define the new name
+        $newName = "nocishappytool"
+        $path = "Cheat Engine"
+        if (-not (Test-Path $path)) { $path = "cheat-engine/Cheat Engine" }
+
+        # 2. Replace strings inside all source files
+        $replacements = @{
+            "Cheat Engine 7.6" = "LLL ABX"
+            "Cheat Engine"     = "XXX Abs"
+            "CheatEngine"      = "$newName"
+        }
+
+        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pps", "*.cpp", "*.po", "*.pas", "*.lfm", "*.lrt", "*.dfm", "*.lpr" | ForEach-Object {
+            $file = $_.FullName
+            $content = Get-Content $file -Raw
+            foreach ($old in $replacements.Keys) {
+                $content = $content -replace [regex]::Escape($old), $replacements[$old]
+            }
+            Set-Content $file $content
+        }
+
+        # 3. PHYSICALLY RENAME the project files so the compiler can find them
+        Write-Host "Renaming physical files..."
+        Rename-Item "$path/cheatengine.lpi" "$newName.lpi"
+        Rename-Item "$path/cheatengine.lpr" "$newName.lpr"
+      shell: pwsh
+    
+    - name: Build CheatEngine (64-Bit)
+      run: |
+        lazbuild.exe "Cheat Engine/nocishappytool.lpi" --build-mode="Release 64-Bit"
+      shell: cmd
+
+    - name: Build CheatEngine (32-Bit)
+      run: |
+        lazbuild.exe "Cheat Engine/nocishappytool.lpi" --build-mode="Release 32-Bit"
+      shell: cmd
+
+    - name: Patch Binaries (In-place Byte Replacement)
+      run: |
+        function Replace-Bytes {
+            param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
+            
+            $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
+            $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
+            
+            # Create a new byte array of the exact same length as the old one, filled with 0s
+            $newB = New-Object byte[] $oldB.Length
+            
+            # Copy the new string bytes into it (up to the length of the old string)
+            $copyLen = [Math]::Min($newB_raw.Length, $oldB.Length)
+            [Array]::Copy($newB_raw, $newB, $copyLen)
+            
+            for ($i = 0; $i -le ($Bytes.Length - $oldB.Length); $i++) {
+                $match = $true
+                for ($j = 0; $j -lt $oldB.Length; $j++) {
+                    if ($Bytes[$i + $j] -ne $oldB[$j]) { 
+                        $match = $false; break 
+                    }
+                }
+                if ($match) {
+                    for ($k = 0; $k -lt $oldB.Length; $k++) { 
+                        $Bytes[$i + $k] = $newB[$k] 
+                    }
+                    $i += $oldB.Length - 1 # Skip ahead
+                }
+            }
+            return $Bytes
+        }
+
+        # Find the .exe files wherever they were built
+        $binaries = Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "bin" }
+
+        foreach ($binFile in $binaries) {
+            $f = $binFile.FullName
+            Write-Host "Patching: $f"
+            $data = [System.IO.File]::ReadAllBytes($f)
+            
+            # Perform replacements
+            $data = Replace-Bytes -Bytes $data -OldStr "Cheat Engine" -NewStr "Nocis Happy Tool"
+            $data = Replace-Bytes -Bytes $data -OldStr "CheatEngine" -NewStr "NocisHappyTool"
+            
+            [System.IO.File]::WriteAllBytes($f, $data)
+            Write-Host "Successfully patched $f"
+        }
+      shell: pwsh
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Compiled-Binaries
+        path: Cheat Engine/bin/
+
+    - name: Create Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+          7z a cheat-engine-custom.zip ".\Cheat Engine\bin\*"
+          # Using a dynamic tag based on run number to avoid conflicts
+          $tag = "7.5.0.${{ github.run_number }}"
+          gh release create $tag .\cheat-engine-custom.zip --title "Build $tag" --notes "Automated custom build."
+      shell: pwsh
