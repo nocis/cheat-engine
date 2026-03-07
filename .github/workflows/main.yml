@@ -43,7 +43,7 @@ jobs:
             "Cheat Engine"     = "Nocis Happy Tool"
         }
 
-        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr", "*.sln" | ForEach-Object {
+        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr", "*.sln", "*.vcxproj" | ForEach-Object {
             $content = Get-Content $_.FullName -Raw
             foreach ($old in $replacements.Keys) {
                 $content = $content -replace [regex]::Escape($old), $replacements[$old]
@@ -55,40 +55,31 @@ jobs:
     - name: Build Pascal Components (Lazarus)
       run: |
         $ce = $env:PROJECT_DIR
-        
-        Write-Host "Building Main App..."
         & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
         & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
         
-        # For sub-components, we use --build-mode=Release and override the CPU
-        if (Test-Path "$ce\luaclient\luaclient.lpi") {
-          Write-Host "Building LuaClient..."
-          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode=Release --cpu=x86_64 --os=win64
-          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode=Release --cpu=i386 --os=win32
-        }
-        
-        if (Test-Path "$ce\speedhack\speedhack.lpi") {
-          Write-Host "Building Speedhack..."
-          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode=Release --cpu=x86_64 --os=win64
-          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode=Release --cpu=i386 --os=win32
-        }
-
-        if (Test-Path "$ce\vehdebug\vehdebug.lpi") {
-          Write-Host "Building VEHDebug..."
-          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode=Release --cpu=x86_64 --os=win64
-          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode=Release --cpu=i386 --os=win32
+        $subprojs = @("luaclient\luaclient.lpi", "speedhack\speedhack.lpi", "vehdebug\vehdebug.lpi")
+        foreach ($p in $subprojs) {
+            $ppath = Join-Path $ce $p
+            if (Test-Path $ppath) {
+                & lazbuild.exe $ppath --build-mode=Release --cpu=x86_64 --os=win64
+                & lazbuild.exe $ppath --build-mode=Release --cpu=i386 --os=win32
+            }
         }
       shell: pwsh
 
-    - name: Build C++ Components (MSBuild)
+    - name: Build C++ Components (MSBuild Retargeted)
       run: |
         $ce = $env:PROJECT_DIR
+        
+        # We force the Toolset to v143 (VS2022) and SDK to 10.0
+        $msArgs = "/p:Configuration=Release /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0"
+
         $solutions = @(
           "DirectXMess\DirectXMess.sln",
           "DotNetCompiler\DotNetCompiler.sln",
           "MonoDataCollector\MonoDataCollector.sln",
           "DotNetDataCollector\DotNetDataCollector.sln",
-          "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln",
           "cejvmti\cejvmti.sln",
           "tcclib\tcclib.sln"
         )
@@ -96,10 +87,16 @@ jobs:
         foreach ($sln in $solutions) {
           $slnPath = Join-Path $ce $sln
           if (Test-Path $slnPath) {
-            Write-Host "Building solution: $sln"
-            msbuild.exe $slnPath /p:Configuration=Release /p:Platform=x64
-            msbuild.exe $slnPath /p:Configuration=Release /p:Platform=Win32
+            Write-Host "--- Building $sln ---"
+            msbuild.exe $slnPath $msArgs /p:Platform=x64
+            msbuild.exe $slnPath $msArgs /p:Platform=Win32
           }
+        }
+
+        # Special Case: DotNetInvasiveDataCollector (Usually AnyCPU)
+        $dnInvasive = Join-Path $ce "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln"
+        if (Test-Path $dnInvasive) {
+            msbuild.exe $dnInvasive /p:Configuration=Release /p:Platform="Any CPU"
         }
       shell: pwsh
 
@@ -107,7 +104,8 @@ jobs:
       run: |
         $dbkPath = Join-Path $env:PROJECT_DIR "dbkkernel\dbkkernel.sln"
         if (Test-Path $dbkPath) {
-           msbuild.exe $dbkPath /p:Configuration="Release No-Sig" /p:Platform=x64
+           # Retargeting drivers is risky but necessary here
+           msbuild.exe $dbkPath /p:Configuration="Release No-Sig" /p:Platform=x64 /p:PlatformToolset=WindowsKernelModeDriver15.0 /p:WindowsTargetPlatformVersion=10.0
         }
       shell: pwsh
 
@@ -117,29 +115,18 @@ jobs:
         if (-not (Test-Path $binPath)) { throw "Bin folder not found" }
         cd $binPath
 
-        # 1. Rename EXEs
         Get-ChildItem -Filter "cheatengine*.exe" | ForEach-Object {
             $newName = $_.Name -replace "cheatengine", "nocishappytool"
             Rename-Item $_.FullName $newName
         }
 
-        # 2. Binary Patch
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
-            $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
-            $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
-            $newB = New-Object byte[] $oldB.Length
-            $copyLen = [Math]::Min($newB_raw.Length, $oldB.Length)
-            [Array]::Copy($newB_raw, $newB, $copyLen)
+            $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr); $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
+            $newB = New-Object byte[] $oldB.Length; [Array]::Copy($newB_raw, $newB, ([Math]::Min($newB_raw.Length, $oldB.Length)))
             for ($i = 0; $i -le ($Bytes.Length - $oldB.Length); $i++) {
-                $match = $true
-                for ($j = 0; $j -lt $oldB.Length; $j++) {
-                    if ($Bytes[$i + $j] -ne $oldB[$j]) { $match = $false; break }
-                }
-                if ($match) {
-                    for ($k = 0; $k -lt $oldB.Length; $k++) { $Bytes[$i + $k] = $newB[$k] }
-                    $i += $oldB.Length - 1
-                }
+                $match = $true; for ($j = 0; $j -lt $oldB.Length; $j++) { if ($Bytes[$i + $j] -ne $oldB[$j]) { $match = $false; break } }
+                if ($match) { for ($k = 0; $k -lt $oldB.Length; $k++) { $Bytes[$i + $k] = $newB[$k] }; $i += $oldB.Length - 1 }
             }
             return $Bytes
         }
@@ -152,17 +139,4 @@ jobs:
       shell: pwsh
       
     - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: Full-Compiled-Binaries
-        path: ${{ env.PROJECT_DIR }}/bin/
-
-    - name: Create Release
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-          $binFiles = Join-Path $env:PROJECT_DIR "bin\*"
-          7z a nocishappytool-full.zip $binFiles
-          $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag (Full)" --notes "Automated full build with sub-components fixed."
-      shell: pwsh
+      uses: actio
