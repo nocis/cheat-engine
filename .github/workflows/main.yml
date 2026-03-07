@@ -39,7 +39,7 @@ jobs:
         "PROJECT_DIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
 
         $replacements = @{
-            "Cheat Engine 7.6" = "Nocis Happy Tool 7.6"
+            "Cheat Engine 7.6" = "LLL ABX"
             "Cheat Engine"     = "Nocis Happy Tool"
         }
 
@@ -54,29 +54,29 @@ jobs:
 
     - name: Build Pascal Components (Lazarus)
       run: |
-        # In PWSH, we use $env:PROJECT_DIR
         $ce = $env:PROJECT_DIR
         
         Write-Host "Building Main App..."
         & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
         & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
         
+        # For sub-components, we use --build-mode=Release and override the CPU
         if (Test-Path "$ce\luaclient\luaclient.lpi") {
           Write-Host "Building LuaClient..."
-          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 64-Bit"
-          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode="Release 32-Bit"
+          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode=Release --cpu=x86_64 --os=win64
+          & lazbuild.exe "$ce\luaclient\luaclient.lpi" --build-mode=Release --cpu=i386 --os=win32
         }
         
         if (Test-Path "$ce\speedhack\speedhack.lpi") {
           Write-Host "Building Speedhack..."
-          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 64-Bit"
-          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode="Release 32-Bit"
+          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode=Release --cpu=x86_64 --os=win64
+          & lazbuild.exe "$ce\speedhack\speedhack.lpi" --build-mode=Release --cpu=i386 --os=win32
         }
 
         if (Test-Path "$ce\vehdebug\vehdebug.lpi") {
           Write-Host "Building VEHDebug..."
-          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 64-Bit"
-          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode="Release 32-Bit"
+          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode=Release --cpu=x86_64 --os=win64
+          & lazbuild.exe "$ce\vehdebug\vehdebug.lpi" --build-mode=Release --cpu=i386 --os=win32
         }
       shell: pwsh
 
@@ -164,5 +164,5 @@ jobs:
           $binFiles = Join-Path $env:PROJECT_DIR "bin\*"
           7z a nocishappytool-full.zip $binFiles
           $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag (Full)" --notes "Automated full build."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag (Full)" --notes "Automated full build with sub-components fixed."
       shell: pwsh
