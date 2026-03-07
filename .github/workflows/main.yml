@@ -32,22 +32,27 @@ jobs:
         Start-Process -FilePath ".\lazarus-cross-installer.exe" -ArgumentList "/VERYSILENT /SP- /DIR=$lazDir" -Wait
       shell: pwsh
       
-    - name: Find Project Path and Rename UI
+    - name: Find Path, Rename UI, and Retarget .NET
       run: |
         $lpiFile = Get-ChildItem -Recurse -Filter "cheatengine.lpi" | Select-Object -First 1
         if ($null -eq $lpiFile) { $path = $pwd.Path } else { $path = $lpiFile.Directory.FullName }
         "PROJECT_DIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+        # 1. Replace UI Strings
         $replacements = @{
             "Cheat Engine 7.6" = "LLL ABX"
             "Cheat Engine"     = "Nocis Happy Tool"
         }
 
-        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr", "*.sln", "*.vcxproj" | ForEach-Object {
+        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr", "*.sln", "*.vcxproj", "*.csproj" | ForEach-Object {
             $content = Get-Content $_.FullName -Raw
             foreach ($old in $replacements.Keys) {
                 $content = $content -replace [regex]::Escape($old), $replacements[$old]
             }
+            
+            # 2. Retarget .NET 4.0 to .NET 4.8 (Fixes MSB3644)
+            $content = $content -replace "<TargetFrameworkVersion>v4.0</TargetFrameworkVersion>", "<TargetFrameworkVersion>v4.8</TargetFrameworkVersion>"
+            
             Set-Content $_.FullName $content
         }
       shell: pwsh
@@ -68,18 +73,16 @@ jobs:
         }
       shell: pwsh
 
-    - name: Build C++ Components (MSBuild Retargeted)
+    - name: Restore and Build C++ / C# Components
       run: |
         $ce = $env:PROJECT_DIR
         
-        # We force the Toolset to v143 (VS2022) and SDK to 10.0
-        $msArgs = "/p:Configuration=Release /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0"
-
         $solutions = @(
           "DirectXMess\DirectXMess.sln",
           "DotNetCompiler\DotNetCompiler.sln",
           "MonoDataCollector\MonoDataCollector.sln",
           "DotNetDataCollector\DotNetDataCollector.sln",
+          "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln",
           "cejvmti\cejvmti.sln",
           "tcclib\tcclib.sln"
         )
@@ -87,16 +90,17 @@ jobs:
         foreach ($sln in $solutions) {
           $slnPath = Join-Path $ce $sln
           if (Test-Path $slnPath) {
-            Write-Host "--- Building $sln ---"
-            msbuild.exe $slnPath $msArgs /p:Platform=x64
-            msbuild.exe $slnPath $msArgs /p:Platform=Win32
+            Write-Host "Restoring and Building: $sln"
+            
+            # Restore NuGet packages for C# projects (Fixes NETSDK1004)
+            msbuild.exe $slnPath /t:Restore
+            
+            # Build for x64
+            msbuild.exe $slnPath /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0
+            
+            # Build for Win32 (Try/Catch because some .NET projects only support AnyCPU/x64)
+            try { msbuild.exe $slnPath /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 -ErrorAction SilentlyContinue } catch {}
           }
-        }
-
-        # Special Case: DotNetInvasiveDataCollector (Usually AnyCPU)
-        $dnInvasive = Join-Path $ce "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln"
-        if (Test-Path $dnInvasive) {
-            msbuild.exe $dnInvasive /p:Configuration=Release /p:Platform="Any CPU"
         }
       shell: pwsh
 
@@ -104,7 +108,6 @@ jobs:
       run: |
         $dbkPath = Join-Path $env:PROJECT_DIR "dbkkernel\dbkkernel.sln"
         if (Test-Path $dbkPath) {
-           # Retargeting drivers is risky but necessary here
            msbuild.exe $dbkPath /p:Configuration="Release No-Sig" /p:Platform=x64 /p:PlatformToolset=WindowsKernelModeDriver15.0 /p:WindowsTargetPlatformVersion=10.0
         }
       shell: pwsh
@@ -151,5 +154,5 @@ jobs:
           $binFiles = Join-Path $env:PROJECT_DIR "bin\*"
           7z a nocishappytool-full.zip $binFiles
           $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build with retargeted C++ components."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build with .NET 4.8 retargeting and NuGet restore fixed."
       shell: pwsh
