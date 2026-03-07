@@ -22,92 +22,59 @@ jobs:
 
     - name: Download and Install Lazarus i386 Cross-Compiler
       run: |
-        # 1. Dynamically find where Lazarus is currently installed
         $lazbuildPath = (Get-Command lazbuild.exe).Source
         $lazDir = Split-Path -Parent $lazbuildPath
-        Write-Host "Lazarus is installed at: $lazDir"
-
-        # 2. Download the installer
         $url = "https://downloads.sourceforge.net/project/lazarus/Lazarus%20Windows%2064%20bits/Lazarus%202.2.2/lazarus-2.2.2-fpc-3.2.2-cross-i386-win32-win64.exe"
-        Write-Host "Downloading cross-compiler..."
         curl.exe -L -o "lazarus-cross-installer.exe" $url
-        
-        # 3. Check file size
-        if ((Get-Item "lazarus-cross-installer.exe").Length -lt 40MB) {
-            Write-Error "Download failed: File too small."
-            exit 1
-        }
-        
-        # 4. Install into the EXACT directory found in step 1
-        Write-Host "Installing cross-compiler into $lazDir ..."
-        $process = Start-Process -FilePath ".\lazarus-cross-installer.exe" -ArgumentList "/VERYSILENT /SP- /DIR=$lazDir" -Wait -PassThru
-        
-        if ($process.ExitCode -ne 0) {
-            Write-Error "Installer failed with exit code $($process.ExitCode)"
-            exit 1
-        }
-        Write-Host "Installation successful."
+        Start-Process -FilePath ".\lazarus-cross-installer.exe" -ArgumentList "/VERYSILENT /SP- /DIR=$lazDir" -Wait
       shell: pwsh
       
-    - name: Rename Project and Strings
+    - name: Rename UI Strings and Find Path
       run: |
-        $newName = "nocishappytool"
-        # Determine the correct path
-        $path = "Cheat Engine"
-        if (-not (Test-Path $path)) { $path = "cheat-engine/Cheat Engine" }
-        Write-Host "Working in path: $path"
+        # 1. Automatically find where the project folder is
+        $lpiFile = Get-ChildItem -Recurse -Filter "cheatengine.lpi" | Select-Object -First 1
+        $path = $lpiFile.Directory.FullName
+        Echo "PROJECT_DIR=$path" >> $env:GITHUB_ENV
 
-        # 1. Replace UI Strings (The safe ones with spaces)
+        # 2. Replace UI Strings (Text with spaces is safe to change)
+        # This changes the Title Bar and Menu items
         $replacements = @{
             "Cheat Engine 7.6" = "LLL ABX"
-            "Cheat Engine"     = "XXX Abs"
+            "Cheat Engine"     = "Nocis Happy Tool"
         }
 
-        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pps", "*.cpp", "*.po", "*.pas", "*.lfm", "*.lrt", "*.dfm", "*.lpr" | ForEach-Object {
-            $file = $_.FullName
-            $content = Get-Content $file -Raw
+        Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pas", "*.lfm", "*.lpr" | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
             foreach ($old in $replacements.Keys) {
                 $content = $content -replace [regex]::Escape($old), $replacements[$old]
             }
-            Set-Content $file $content
+            Set-Content $_.FullName $content
         }
-
-        # 2. PHYSICALLY RENAME the project files
-        Write-Host "Renaming physical files..."
-        Rename-Item "$path/cheatengine.lpi" "$newName.lpi"
-        Rename-Item "$path/cheatengine.lpr" "$newName.lpr"
-
-        # 3. CRITICAL: Update the internal XML inside the .lpi file
-        # This tells Lazarus that the main file is now 'nocishappytool.lpr' instead of 'cheatengine.lpr'
-        Write-Host "Updating project internal references..."
-        $lpiFile = "$path/$newName.lpi"
-        $lpiContent = Get-Content $lpiFile -Raw
-        
-        # This replaces the main source file reference
-        $lpiContent = $lpiContent -replace 'Filename="cheatengine.lpr"', "Filename=""$newName.lpr"""
-        
-        # This replaces the project title
-        $lpiContent = $lpiContent -replace '<Title Value="cheatengine"/>', "<Title Value=""$newName""/>"
-        
-        # This fixes the output .exe names inside the project settings
-        $lpiContent = $lpiContent -replace 'cheatengine-x86_64', "$newName-x86_64"
-        $lpiContent = $lpiContent -replace 'cheatengine-i386', "$newName-i386"
-        
-        Set-Content $lpiFile $lpiContent
       shell: pwsh
     
     - name: Build CheatEngine (64-Bit)
       run: |
-        lazbuild.exe "Cheat Engine/nocishappytool.lpi" --build-mode="Release 64-Bit"
+        lazbuild.exe "${{ env.PROJECT_DIR }}\cheatengine.lpi" --build-mode="Release 64-Bit"
       shell: cmd
 
     - name: Build CheatEngine (32-Bit)
       run: |
-        lazbuild.exe "Cheat Engine/nocishappytool.lpi" --build-mode="Release 32-Bit"
+        lazbuild.exe "${{ env.PROJECT_DIR }}\cheatengine.lpi" --build-mode="Release 32-Bit"
       shell: cmd
 
-    - name: Patch Binaries (Safe Byte Replacement)
+    - name: Rename Compiled Exe and Patch
       run: |
+        # 1. Move to the bin folder
+        $binPath = "${{ env.PROJECT_DIR }}\bin"
+        cd $binPath
+
+        # 2. Rename the actual .exe files so they don't say "cheatengine"
+        Get-ChildItem -Filter "*.exe" | ForEach-Object {
+            $newName = $_.Name -replace "cheatengine", "nocishappytool"
+            Rename-Item $_.FullName $newName
+        }
+
+        # 3. Apply the Byte-Patch to the renamed exe files
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
             $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
@@ -115,7 +82,6 @@ jobs:
             $newB = New-Object byte[] $oldB.Length
             $copyLen = [Math]::Min($newB_raw.Length, $oldB.Length)
             [Array]::Copy($newB_raw, $newB, $copyLen)
-            
             for ($i = 0; $i -le ($Bytes.Length - $oldB.Length); $i++) {
                 $match = $true
                 for ($j = 0; $j -lt $oldB.Length; $j++) {
@@ -129,21 +95,11 @@ jobs:
             return $Bytes
         }
 
-        $binaries = Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "bin" }
-
-        foreach ($binFile in $binaries) {
-            $f = $binFile.FullName
-            Write-Host "Patching: $f"
-            $data = [System.IO.File]::ReadAllBytes($f)
-            
-            # ONLY replace the one with the space. 
-            # This changes the UI text but leaves the code logic alone.
+        Get-ChildItem -Filter "*.exe" | ForEach-Object {
+            $data = [System.IO.File]::ReadAllBytes($_.FullName)
             $data = Replace-Bytes -Bytes $data -OldStr "Cheat Engine" -NewStr "Nocis Happy Tool"
-            
-            # REMOVED: The "CheatEngine" -> "NocisHappyTool" line to prevent crashes
-            
-            [System.IO.File]::WriteAllBytes($f, $data)
-            Write-Host "Successfully patched $f"
+            [System.IO.File]::WriteAllBytes($_.FullName, $data)
+            Write-Host "Patched internal strings in: $($_.Name)"
         }
       shell: pwsh
       
@@ -151,14 +107,14 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: Compiled-Binaries
-        path: Cheat Engine/bin/
+        path: ${{ env.PROJECT_DIR }}/bin/
 
     - name: Create Release
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-          7z a cheat-engine-custom.zip ".\Cheat Engine\bin\*"
-          # Using a dynamic tag based on run number to avoid conflicts
+          $binPath = "${{ env.PROJECT_DIR }}\bin\*"
+          7z a nocishappytool-build.zip $binPath
           $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\cheat-engine-custom.zip --title "Build $tag" --notes "Automated custom build."
+          gh release create $tag .\nocishappytool-build.zip --title "Build $tag" --notes "Automated build of Nocis Happy Tool."
       shell: pwsh
