@@ -49,18 +49,18 @@ jobs:
         Write-Host "Installation successful."
       shell: pwsh
       
-    - name: Rename Project and Strings
+    - name: Rename Project and Strings (Safe Version)
       run: |
-        # 1. Define the new name
         $newName = "nocishappytool"
         $path = "Cheat Engine"
         if (-not (Test-Path $path)) { $path = "cheat-engine/Cheat Engine" }
 
-        # 2. Replace strings inside all source files
+        # 1. Define specific replacements
+        # We only replace "Cheat Engine" (with space) to change the UI labels
+        # We avoid replacing "CheatEngine" (no space) globally to prevent breaking Lua functions
         $replacements = @{
             "Cheat Engine 7.6" = "LLL ABX"
             "Cheat Engine"     = "XXX Abs"
-            "CheatEngine"      = "$newName"
         }
 
         Get-ChildItem -Path $path -Recurse -Include "*.lpi", "*.lua", "*.pps", "*.cpp", "*.po", "*.pas", "*.lfm", "*.lrt", "*.dfm", "*.lpr" | ForEach-Object {
@@ -72,10 +72,11 @@ jobs:
             Set-Content $file $content
         }
 
-        # 3. PHYSICALLY RENAME the project files so the compiler can find them
-        Write-Host "Renaming physical files..."
-        Rename-Item "$path/cheatengine.lpi" "$newName.lpi"
-        Rename-Item "$path/cheatengine.lpr" "$newName.lpr"
+        # 2. Rename the project files ONLY
+        # This allows the compiler to create "nocishappytool.exe" without breaking the internal code
+        Write-Host "Renaming physical project files..."
+        if (Test-Path "$path/cheatengine.lpi") { Rename-Item "$path/cheatengine.lpi" "$newName.lpi" }
+        if (Test-Path "$path/cheatengine.lpr") { Rename-Item "$path/cheatengine.lpr" "$newName.lpr" }
       shell: pwsh
     
     - name: Build CheatEngine (64-Bit)
@@ -88,39 +89,29 @@ jobs:
         lazbuild.exe "Cheat Engine/nocishappytool.lpi" --build-mode="Release 32-Bit"
       shell: cmd
 
-    - name: Patch Binaries (In-place Byte Replacement)
+    - name: Patch Binaries (Safe Byte Replacement)
       run: |
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
-            
             $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
             $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
-            
-            # Create a new byte array of the exact same length as the old one, filled with 0s
             $newB = New-Object byte[] $oldB.Length
-            
-            # Copy the new string bytes into it (up to the length of the old string)
             $copyLen = [Math]::Min($newB_raw.Length, $oldB.Length)
             [Array]::Copy($newB_raw, $newB, $copyLen)
             
             for ($i = 0; $i -le ($Bytes.Length - $oldB.Length); $i++) {
                 $match = $true
                 for ($j = 0; $j -lt $oldB.Length; $j++) {
-                    if ($Bytes[$i + $j] -ne $oldB[$j]) { 
-                        $match = $false; break 
-                    }
+                    if ($Bytes[$i + $j] -ne $oldB[$j]) { $match = $false; break }
                 }
                 if ($match) {
-                    for ($k = 0; $k -lt $oldB.Length; $k++) { 
-                        $Bytes[$i + $k] = $newB[$k] 
-                    }
-                    $i += $oldB.Length - 1 # Skip ahead
+                    for ($k = 0; $k -lt $oldB.Length; $k++) { $Bytes[$i + $k] = $newB[$k] }
+                    $i += $oldB.Length - 1
                 }
             }
             return $Bytes
         }
 
-        # Find the .exe files wherever they were built
         $binaries = Get-ChildItem -Recurse -Filter "*.exe" | Where-Object { $_.FullName -match "bin" }
 
         foreach ($binFile in $binaries) {
@@ -128,15 +119,17 @@ jobs:
             Write-Host "Patching: $f"
             $data = [System.IO.File]::ReadAllBytes($f)
             
-            # Perform replacements
+            # ONLY replace the one with the space. 
+            # This changes the UI text but leaves the code logic alone.
             $data = Replace-Bytes -Bytes $data -OldStr "Cheat Engine" -NewStr "Nocis Happy Tool"
-            $data = Replace-Bytes -Bytes $data -OldStr "CheatEngine" -NewStr "NocisHappyTool"
+            
+            # REMOVED: The "CheatEngine" -> "NocisHappyTool" line to prevent crashes
             
             [System.IO.File]::WriteAllBytes($f, $data)
             Write-Host "Successfully patched $f"
         }
       shell: pwsh
-
+      
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
