@@ -58,16 +58,12 @@ jobs:
         $ce = $env:PROJECT_DIR
         cd $ce
         
-        # Create the bin folder manually just in case
-        New-Item -ItemType Directory -Path (Join-Path $ce "bin") -Force
-
         # 1. Build Main App
         & lazbuild.exe "cheatengine.lpi" --build-mode="Release 64-Bit"
         & lazbuild.exe "cheatengine.lpi" --build-mode="Release 32-Bit"
         
-        # 2. Build Sub-projects
-        # REMOVED --build-mode=Release because luaclient/speedhack often don't have it defined.
-        # We specify CPU and OS directly to force the correct architecture.
+        # 2. Build Sub-projects (luaclient, speedhack, vehdebug)
+        # We specify CPU and OS directly because these projects often lack a "Release" build mode.
         $subprojs = @("luaclient\luaclient.lpi", "speedhack\speedhack.lpi", "vehdebug\vehdebug.lpi")
         foreach ($p in $subprojs) {
             $ppath = Join-Path $ce $p
@@ -97,6 +93,7 @@ jobs:
         foreach ($sln in $solutions) {
           $slnPath = Join-Path $ce $sln
           if (Test-Path $slnPath) {
+            Write-Host "Building Solution: $sln"
             & msbuild.exe $slnPath /t:Restore
             & msbuild.exe $slnPath $msArgs /p:Platform=x64
             & msbuild.exe $slnPath $msArgs /p:Platform=Win32
@@ -104,7 +101,7 @@ jobs:
         }
       shell: pwsh
 
-    - name: Final Consolidation and Asset Collection
+    - name: Final Consolidation (Aggressive Search)
       run: |
         $ce = $env:PROJECT_DIR
         $outDir = Join-Path $env:GITHUB_WORKSPACE "FullBuild"
@@ -114,19 +111,28 @@ jobs:
         # 1. Copy the main 'bin' folder content
         $ceBin = Join-Path $ce "bin"
         if (Test-Path $ceBin) {
-            Write-Host "Copying initial bin content..."
             Copy-Item -Path "$ceBin\*" -Destination $outDir -Recurse -Force
         }
 
-        # 2. Deep Search for luaclient, speedhack, and collectors
-        # Sometimes Lazarus puts them in luaclient/lib/x86_64-win64/ or luaclient/bin/
-        Write-Host "Scanning for libraries and dependencies..."
-        $patterns = @("luaclient*.dll", "speedhack*.dll", "vehdebug*.dll", "MonoDataCollector*.dll", "DotNetDataCollector*.dll", "DotNetCompiler*.exe")
+        # 2. Search for ALL critical DLLs and EXEs (including TCC, Luaclient, and DataCollectors)
+        Write-Host "Scanning for missing libraries..."
+        $patterns = @(
+            "luaclient*.dll", 
+            "speedhack*.dll", 
+            "vehdebug*.dll", 
+            "tcc*.dll", 
+            "MonoDataCollector*.dll", 
+            "DotNetDataCollector*.dll", 
+            "DotNetCompiler*.exe",
+            "cejvmti*.dll"
+        )
+        
         foreach ($pattern in $patterns) {
-            Get-ChildItem -Path $ce -Recurse -Filter $pattern | ForEach-Object {
-                if ($_.FullName -notmatch "obj") { # Skip object folders
+            # Recurse through the whole project, exclude 'obj' and 'ipch' (compiler junk)
+            Get-ChildItem -Path $ce -Recurse -Filter $pattern | Where-Object { $_.FullName -notmatch "obj|ipch" } | ForEach-Object {
+                if (-not (Test-Path (Join-Path $outDir $_.Name))) {
                     Copy-Item $_.FullName $outDir -Force
-                    Write-Host "Found and Copied: $($_.Name) from $($_.DirectoryName)"
+                    Write-Host "Found and Collected: $($_.Name) from $($_.DirectoryName)"
                 }
             }
         }
@@ -160,10 +166,9 @@ jobs:
             Rename-Item $_.FullName $newName
         }
 
-        # Binary Patch logic
+        # Binary Patch logic (replaces strings in EXEs and DLLs)
         function Patch-File {
             param($FilePath)
-            Write-Host "Patching $FilePath..."
             $bytes = [System.IO.File]::ReadAllBytes($FilePath)
             $oldStr = "Cheat Engine"; $newStr = "Nocis Happy Tool"
             $oldB = [System.Text.Encoding]::ASCII.GetBytes($oldStr)
@@ -171,6 +176,7 @@ jobs:
             $newB = New-Object byte[] $oldB.Length
             [Array]::Copy($newB_raw, $newB, ([Math]::Min($newB_raw.Length, $oldB.Length)))
             
+            $found = $false
             for ($i = 0; $i -le ($bytes.Length - $oldB.Length); $i++) {
                 $match = $true
                 for ($j = 0; $j -lt $oldB.Length; $j++) {
@@ -178,12 +184,15 @@ jobs:
                 }
                 if ($match) {
                     for ($k = 0; $k -lt $oldB.Length; $k++) { $bytes[$i + $k] = $newB[$k] }
+                    $found = $true
                 }
             }
-            [System.IO.File]::WriteAllBytes($FilePath, $bytes)
+            if ($found) { 
+                [System.IO.File]::WriteAllBytes($FilePath, $bytes)
+                Write-Host "Patched strings in: $FilePath"
+            }
         }
 
-        # Patch EXEs and DLLs (DLLs also contain internal strings)
         Get-ChildItem -Include "*.exe", "*.dll" -Recurse | ForEach-Object {
             Patch-File $_.FullName
         }
@@ -202,5 +211,5 @@ jobs:
           $binDir = $env:FINAL_BIN
           Compress-Archive -Path "$binDir\*" -DestinationPath "nocishappytool-full.zip"
           $tag = "v7.6.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build including all DLLs and Lua dependencies."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build including luaclient, TCC, and all dependencies."
       shell: pwsh
