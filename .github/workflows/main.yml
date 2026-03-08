@@ -96,9 +96,15 @@ jobs:
     - name: Build TCC Components (Dedicated Step)
       run: |
         $ce = $env:PROJECT_DIR
-        # Path provided: Cheat Engine/tcclib/win32/tcc/tcc.sln
         $tccSln = Join-Path $ce "tcclib\win32\tcc\tcc.sln"
         
+        # We must force the WindowsTargetPlatformVersion and PlatformToolset 
+        # to override the hardcoded values in the vcxproj file.
+        $tccArgs = @(
+            "/p:PlatformToolset=v143",
+            "/p:WindowsTargetPlatformVersion=10.0"
+        )
+
         if (-not (Test-Path $tccSln)) {
             Write-Error "TCC Solution not found at $tccSln"
             exit 1
@@ -106,10 +112,10 @@ jobs:
 
         Write-Host "Building TCC x64 (tcc64-64.dll)..."
         & msbuild.exe $tccSln /t:Restore
-        & msbuild.exe $tccSln /p:Configuration="Output to 64 (Release)" /p:Platform=x64 /p:PlatformToolset=v143
+        & msbuild.exe $tccSln $tccArgs /p:Configuration="Output to 64 (Release)" /p:Platform=x64
 
         Write-Host "Building TCC x86 (tcc32-32.dll)..."
-        & msbuild.exe $tccSln /p:Configuration="Output to 32 (Release)" /p:Platform=Win32 /p:PlatformToolset=v143
+        & msbuild.exe $tccSln $tccArgs /p:Configuration="Output to 32 (Release)" /p:Platform=Win32
       shell: pwsh
 
     - name: Final Consolidation
