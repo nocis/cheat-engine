@@ -57,26 +57,20 @@ jobs:
       run: |
         $ce = $env:PROJECT_DIR
         cd $ce
-        
-        # 1. Build Main App
         & lazbuild.exe "cheatengine.lpi" --build-mode="Release 64-Bit"
         & lazbuild.exe "cheatengine.lpi" --build-mode="Release 32-Bit"
         
-        # 2. Build Sub-projects (luaclient, speedhack, vehdebug)
-        # We specify CPU and OS directly because these projects often lack a "Release" build mode.
         $subprojs = @("luaclient\luaclient.lpi", "speedhack\speedhack.lpi", "vehdebug\vehdebug.lpi")
         foreach ($p in $subprojs) {
             $ppath = Join-Path $ce $p
             if (Test-Path $ppath) {
-                Write-Host "Building $p (x64) ..."
                 & lazbuild.exe $ppath --cpu=x86_64 --os=win64
-                Write-Host "Building $p (i386) ..."
                 & lazbuild.exe $ppath --cpu=i386 --os=win32
             }
         }
       shell: pwsh
 
-    - name: Build C++ Components (MSBuild)
+    - name: Build C++ Components (Standard)
       run: |
         $ce = $env:PROJECT_DIR
         $msArgs = @("/p:Configuration=Release", "/p:PlatformToolset=v143", "/p:WindowsTargetPlatformVersion=10.0")
@@ -86,14 +80,12 @@ jobs:
           "DotNetCompiler\DotNetCompiler.sln",
           "MonoDataCollector\MonoDataCollector.sln",
           "DotNetDataCollector\DotNetDataCollector.sln",
-          "cejvmti\cejvmti.sln",
-          "tcclib\tcclib.sln"
+          "cejvmti\cejvmti.sln"
         )
 
         foreach ($sln in $solutions) {
           $slnPath = Join-Path $ce $sln
           if (Test-Path $slnPath) {
-            Write-Host "Building Solution: $sln"
             & msbuild.exe $slnPath /t:Restore
             & msbuild.exe $slnPath $msArgs /p:Platform=x64
             & msbuild.exe $slnPath $msArgs /p:Platform=Win32
@@ -101,56 +93,53 @@ jobs:
         }
       shell: pwsh
 
-    - name: Final Consolidation (Aggressive Search)
+    - name: Build TCC Components (Special Handling)
+      run: |
+        $ce = $env:PROJECT_DIR
+        $slnPath = Join-Path $ce "tcclib\tcclib.sln"
+        $commonArgs = "/p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0"
+
+        if (Test-Path $slnPath) {
+            Write-Host "Building TCC 64-bit DLL..."
+            & msbuild.exe $slnPath /t:Restore
+            & msbuild.exe $slnPath $commonArgs /p:Configuration="Output to 64 (Release)" /p:Platform=x64
+            
+            Write-Host "Building TCC 32-bit DLL..."
+            & msbuild.exe $slnPath $commonArgs /p:Configuration="Output to 32 (Release)" /p:Platform=Win32
+        }
+      shell: pwsh
+
+    - name: Final Consolidation
       run: |
         $ce = $env:PROJECT_DIR
         $outDir = Join-Path $env:GITHUB_WORKSPACE "FullBuild"
         if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
         New-Item -ItemType Directory -Path $outDir -Force
 
-        # 1. Copy the main 'bin' folder content
+        # 1. Main bin
         $ceBin = Join-Path $ce "bin"
-        if (Test-Path $ceBin) {
-            Copy-Item -Path "$ceBin\*" -Destination $outDir -Recurse -Force
-        }
+        if (Test-Path $ceBin) { Copy-Item -Path "$ceBin\*" -Destination $outDir -Recurse -Force }
 
-        # 2. Search for ALL critical DLLs and EXEs (including TCC, Luaclient, and DataCollectors)
-        Write-Host "Scanning for missing libraries..."
-        $patterns = @(
-            "luaclient*.dll", 
-            "speedhack*.dll", 
-            "vehdebug*.dll", 
-            "tcc*.dll", 
-            "MonoDataCollector*.dll", 
-            "DotNetDataCollector*.dll", 
-            "DotNetCompiler*.exe",
-            "cejvmti*.dll"
-        )
-        
+        # 2. Aggressive search for TCC and other DLLs
+        # TCC often lands in tcclib/tcc/x64/Output to 64 (Release)/
+        Write-Host "Searching for TCC and Luaclient DLLs..."
+        $patterns = @("tcc*.dll", "luaclient*.dll", "speedhack*.dll", "vehdebug*.dll", "*DataCollector*.dll")
         foreach ($pattern in $patterns) {
-            # Recurse through the whole project, exclude 'obj' and 'ipch' (compiler junk)
             Get-ChildItem -Path $ce -Recurse -Filter $pattern | Where-Object { $_.FullName -notmatch "obj|ipch" } | ForEach-Object {
                 if (-not (Test-Path (Join-Path $outDir $_.Name))) {
                     Copy-Item $_.FullName $outDir -Force
-                    Write-Host "Found and Collected: $($_.Name) from $($_.DirectoryName)"
+                    Write-Host "Captured: $($_.Name)"
                 }
             }
         }
 
-        # 3. Copy Required Resource Folders
+        # 3. Resources
         $folders = @("lua", "languages", "autorun", "win32")
         foreach ($f in $folders) {
             $fPath = Join-Path $ce $f
-            if (Test-Path $fPath) {
-                Copy-Item -Path $fPath -Destination $outDir -Recurse -Force
-                Write-Host "Copied Resource Folder: $f"
-            }
+            if (Test-Path $fPath) { Copy-Item -Path $fPath -Destination $outDir -Recurse -Force }
         }
-        
-        # 4. Copy specific loose scripts
-        if (Test-Path (Join-Path $ce "defines.lua")) {
-            Copy-Item (Join-Path $ce "defines.lua") $outDir -Force
-        }
+        if (Test-Path (Join-Path $ce "defines.lua")) { Copy-Item (Join-Path $ce "defines.lua") $outDir -Force }
 
         "FINAL_BIN=$outDir" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: pwsh
@@ -160,42 +149,36 @@ jobs:
         $binPath = $env:FINAL_BIN
         cd $binPath
 
-        # Rename main executables
         Get-ChildItem -Filter "cheatengine*.exe" | ForEach-Object {
             $newName = $_.Name -replace "cheatengine", "nocishappytool"
             Rename-Item $_.FullName $newName
         }
 
-        # Binary Patch logic (replaces strings in EXEs and DLLs)
         function Patch-File {
             param($FilePath)
             $bytes = [System.IO.File]::ReadAllBytes($FilePath)
-            $oldStr = "Cheat Engine"; $newStr = "Nocis Happy Tool"
-            $oldB = [System.Text.Encoding]::ASCII.GetBytes($oldStr)
-            $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($newStr)
-            $newB = New-Object byte[] $oldB.Length
-            [Array]::Copy($newB_raw, $newB, ([Math]::Min($newB_raw.Length, $oldB.Length)))
+            $oldB = [System.Text.Encoding]::ASCII.GetBytes("Cheat Engine")
+            $newB = [System.Text.Encoding]::ASCII.GetBytes("Nocis Happy Tool") # Must be same length or padded
             
-            $found = $false
+            # Ensure replacement is exactly same length for binary stability
+            $finalNewB = New-Object byte[] $oldB.Length
+            [Array]::Copy($newB, $finalNewB, [Math]::Min($newB.Length, $oldB.Length))
+
+            $modified = $false
             for ($i = 0; $i -le ($bytes.Length - $oldB.Length); $i++) {
                 $match = $true
                 for ($j = 0; $j -lt $oldB.Length; $j++) {
                     if ($bytes[$i + $j] -ne $oldB[$j]) { $match = $false; break }
                 }
                 if ($match) {
-                    for ($k = 0; $k -lt $oldB.Length; $k++) { $bytes[$i + $k] = $newB[$k] }
-                    $found = $true
+                    for ($k = 0; $k -lt $oldB.Length; $k++) { $bytes[$i + $k] = $finalNewB[$k] }
+                    $modified = $true
                 }
             }
-            if ($found) { 
-                [System.IO.File]::WriteAllBytes($FilePath, $bytes)
-                Write-Host "Patched strings in: $FilePath"
-            }
+            if ($modified) { [System.IO.File]::WriteAllBytes($FilePath, $bytes) }
         }
 
-        Get-ChildItem -Include "*.exe", "*.dll" -Recurse | ForEach-Object {
-            Patch-File $_.FullName
-        }
+        Get-ChildItem -Include "*.exe", "*.dll" -Recurse | ForEach-Object { Patch-File $_.FullName }
       shell: pwsh
       
     - name: Upload Artifact
@@ -211,5 +194,5 @@ jobs:
           $binDir = $env:FINAL_BIN
           Compress-Archive -Path "$binDir\*" -DestinationPath "nocishappytool-full.zip"
           $tag = "v7.6.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build including luaclient, TCC, and all dependencies."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build: includes luaclient, tcc64-64.dll, and lua scripts."
       shell: pwsh
