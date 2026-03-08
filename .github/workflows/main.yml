@@ -32,10 +32,10 @@ jobs:
         Start-Process -FilePath ".\lazarus-cross-installer.exe" -ArgumentList "/VERYSILENT /SP- /DIR=$lazDir" -Wait
       shell: pwsh
       
-    - name: Find Path, Rename UI, and Retarget .NET
+    - name: Find Project Root and Rename Branding
       run: |
         $lpiFile = Get-ChildItem -Recurse -Filter "cheatengine.lpi" | Select-Object -First 1
-        if ($null -eq $lpiFile) { $path = $pwd.Path } else { $path = $lpiFile.Directory.FullName }
+        $path = $lpiFile.Directory.FullName
         "PROJECT_DIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
 
         $replacements = @{
@@ -56,11 +56,12 @@ jobs:
     - name: Build Pascal Components (Lazarus)
       run: |
         $ce = $env:PROJECT_DIR
-        # Main App
-        & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
-        & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
+        cd $ce
+        # 1. Build Main App
+        & lazbuild.exe "cheatengine.lpi" --build-mode="Release 64-Bit"
+        & lazbuild.exe "cheatengine.lpi" --build-mode="Release 32-Bit"
         
-        # Sub projects
+        # 2. Build Sub-projects (Fixed paths and naming)
         $subprojs = @("luaclient\luaclient.lpi", "speedhack\speedhack.lpi", "vehdebug\vehdebug.lpi")
         foreach ($p in $subprojs) {
             $ppath = Join-Path $ce $p
@@ -94,57 +95,82 @@ jobs:
             & msbuild.exe $slnPath $msArgs /p:Platform=Win32
           }
         }
-
-        $anyCpuSln = Join-Path $ce "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln"
-        if (Test-Path $anyCpuSln) {
-            & msbuild.exe $anyCpuSln /t:Restore
-            & msbuild.exe $anyCpuSln $msArgs /p:Platform="Any CPU"
-        }
       shell: pwsh
 
-    - name: Consolidate Binaries (Crucial Step)
+    - name: Final Consolidation and Asset Collection
       run: |
         $ce = $env:PROJECT_DIR
-        $binDir = Join-Path $ce "bin"
-        if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir }
+        $outDir = Join-Path $env:GITHUB_WORKSPACE "FullBuild"
+        New-Item -ItemType Directory -Path $outDir -Force
 
-        Write-Host "Collecting all built DLLs and EXEs into $binDir..."
-        
-        # Look for luaclient, speedhack, and vehdebug DLLs that might be in their subfolders
-        $patterns = @("*luaclient*.dll", "*speedhack*.dll", "*vehdebug*.dll", "*DataCollector*.dll", "*DataCollector*.exe")
-        
-        foreach ($pattern in $patterns) {
-            Get-ChildItem -Path $ce -Recurse -Filter $pattern | Where-Object { $_.FullName -notmatch "\\bin\\" } | ForEach-Object {
-                Write-Host "Found $($_.Name) at $($_.DirectoryName), copying to bin..."
-                Copy-Item $_.FullName $binDir -Force
+        # 1. Copy the main 'bin' folder content (where Lazarus puts most things)
+        $ceBin = Join-Path $ce "bin"
+        if (Test-Path $ceBin) {
+            Copy-Item -Path "$ceBin\*" -Destination $outDir -Recurse -Force
+        }
+
+        # 2. Manually find and copy luaclient and other DLLs if they are missing
+        Write-Host "Searching for missing DLLs..."
+        $searchPatterns = @("luaclient*.dll", "speedhack*.dll", "vehdebug*.dll", "MonoDataCollector*.dll", "DotNetDataCollector*.dll")
+        foreach ($pattern in $searchPatterns) {
+            Get-ChildItem -Path $ce -Recurse -Filter $pattern | ForEach-Object {
+                if (-not (Test-Path (Join-Path $outDir $_.Name))) {
+                    Copy-Item $_.FullName $outDir -Force
+                    Write-Host "Collected: $($_.Name)"
+                }
             }
         }
+
+        # 3. Copy Required Folders for a "Full" Build
+        $folders = @("lua", "languages", "autorun", "win32")
+        foreach ($f in $folders) {
+            $fPath = Join-Path $ce $f
+            if (Test-Path $fPath) {
+                Copy-Item -Path $fPath -Destination $outDir -Recurse -Force
+            }
+        }
+        
+        # 4. Copy specific loose files
+        $files = @("defines.lua", "license.txt")
+        foreach ($f in $files) {
+            $fPath = Join-Path $ce $f
+            if (Test-Path $fPath) { Copy-Item $fPath $outDir -Force }
+        }
+
+        "FINAL_BIN=$outDir" | Out-File -FilePath $env:GITHUB_ENV -Append
       shell: pwsh
 
-    - name: Rename Main EXEs and Binary Patch
+    - name: Rename EXEs and Binary Patch
       run: |
-        $binPath = Join-Path $env:PROJECT_DIR "bin"
+        $binPath = $env:FINAL_BIN
         cd $binPath
 
-        # Rename EXEs
+        # Rename main executables
         Get-ChildItem -Filter "cheatengine*.exe" | ForEach-Object {
             $newName = $_.Name -replace "cheatengine", "nocishappytool"
             Rename-Item $_.FullName $newName
         }
 
-        # Binary Patch
+        # Binary Patch Strings inside the EXEs
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
-            $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr); $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
-            $newB = New-Object byte[] $oldB.Length; [Array]::Copy($newB_raw, $newB, ([Math]::Min($newB_raw.Length, $oldB.Length)))
+            $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr)
+            $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
+            $newB = New-Object byte[] $oldB.Length
+            [Array]::Copy($newB_raw, $newB, ([Math]::Min($newB_raw.Length, $oldB.Length)))
             for ($i = 0; $i -le ($Bytes.Length - $oldB.Length); $i++) {
-                $match = $true; for ($j = 0; $j -lt $oldB.Length; $j++) { if ($Bytes[$i + $j] -ne $oldB[$j]) { $match = $false; break } }
-                if ($match) { for ($k = 0; $k -lt $oldB.Length; $k++) { $Bytes[$i + $k] = $newB[$k] }; $i += $oldB.Length - 1 }
+                $match = $true
+                for ($j = 0; $j -lt $oldB.Length; $j++) { if ($Bytes[$i + $j] -ne $oldB[$j]) { $match = $false; break } }
+                if ($match) { 
+                    for ($k = 0; $k -lt $oldB.Length; $k++) { $Bytes[$i + $k] = $newB[$k] } 
+                    $i += $oldB.Length - 1 
+                }
             }
             return $Bytes
         }
 
         Get-ChildItem -Filter "*.exe" | ForEach-Object {
+            Write-Host "Patching strings in $($_.Name)..."
             $data = [System.IO.File]::ReadAllBytes($_.FullName)
             $data = Replace-Bytes -Bytes $data -OldStr "Cheat Engine" -NewStr "Nocis Happy Tool"
             [System.IO.File]::WriteAllBytes($_.FullName, $data)
@@ -154,15 +180,15 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Full-Compiled-Binaries
-        path: ${{ env.PROJECT_DIR }}/bin/
+        name: Nocis-Happy-Tool-Full-Build
+        path: ${{ env.FINAL_BIN }}/
 
     - name: Create Release
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-          $binFiles = Join-Path $env:PROJECT_DIR "bin\*"
-          7z a nocishappytool-full.zip $binFiles
-          $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Fixed missing DLLs by adding Consolidation step."
+          $binDir = $env:FINAL_BIN
+          Compress-Archive -Path "$binDir\*" -DestinationPath "nocishappytool-full.zip"
+          $tag = "v7.6.${{ github.run_number }}"
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build including luaclient, speedhack, and lua scripts."
       shell: pwsh
