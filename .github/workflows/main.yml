@@ -39,7 +39,7 @@ jobs:
         "PROJECT_DIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Append
 
         $replacements = @{
-            "Cheat Engine 7.6" = "LLL ABX"
+            "Cheat Engine 7.6" = "Nocis Happy Tool 7.6"
             "Cheat Engine"     = "Nocis Happy Tool"
         }
 
@@ -56,13 +56,16 @@ jobs:
     - name: Build Pascal Components (Lazarus)
       run: |
         $ce = $env:PROJECT_DIR
+        # Main App
         & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 64-Bit"
         & lazbuild.exe "$ce\cheatengine.lpi" --build-mode="Release 32-Bit"
         
+        # Sub projects
         $subprojs = @("luaclient\luaclient.lpi", "speedhack\speedhack.lpi", "vehdebug\vehdebug.lpi")
         foreach ($p in $subprojs) {
             $ppath = Join-Path $ce $p
             if (Test-Path $ppath) {
+                Write-Host "Building $p ..."
                 & lazbuild.exe $ppath --build-mode=Release --cpu=x86_64 --os=win64
                 & lazbuild.exe $ppath --build-mode=Release --cpu=i386 --os=win32
             }
@@ -74,7 +77,6 @@ jobs:
         $ce = $env:PROJECT_DIR
         $msArgs = @("/p:Configuration=Release", "/p:PlatformToolset=v143", "/p:WindowsTargetPlatformVersion=10.0")
 
-        # Standard Platform Solutions (x64 and Win32)
         $solutions = @(
           "DirectXMess\DirectXMess.sln",
           "DotNetCompiler\DotNetCompiler.sln",
@@ -87,42 +89,50 @@ jobs:
         foreach ($sln in $solutions) {
           $slnPath = Join-Path $ce $sln
           if (Test-Path $slnPath) {
-            Write-Host "Building: $sln"
             & msbuild.exe $slnPath /t:Restore
             & msbuild.exe $slnPath $msArgs /p:Platform=x64
-            # We use a simple try-block to prevent the whole build from stopping if a Win32 sub-project is missing
             & msbuild.exe $slnPath $msArgs /p:Platform=Win32
           }
         }
 
-        # Any CPU Solutions (Specifically the Invasive Collector)
         $anyCpuSln = Join-Path $ce "DotNetInvasiveDataCollector\DotNetInvasiveDataCollector.sln"
         if (Test-Path $anyCpuSln) {
-            Write-Host "Building AnyCPU: DotNetInvasiveDataCollector"
             & msbuild.exe $anyCpuSln /t:Restore
             & msbuild.exe $anyCpuSln $msArgs /p:Platform="Any CPU"
         }
       shell: pwsh
 
-    - name: Build DBK Kernel Driver
+    - name: Consolidate Binaries (Crucial Step)
       run: |
-        $dbkPath = Join-Path $env:PROJECT_DIR "dbkkernel\dbkkernel.sln"
-        if (Test-Path $dbkPath) {
-           & msbuild.exe $dbkPath /p:Configuration="Release No-Sig" /p:Platform=x64 /p:PlatformToolset=WindowsKernelModeDriver15.0 /p:WindowsTargetPlatformVersion=10.0
+        $ce = $env:PROJECT_DIR
+        $binDir = Join-Path $ce "bin"
+        if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir }
+
+        Write-Host "Collecting all built DLLs and EXEs into $binDir..."
+        
+        # Look for luaclient, speedhack, and vehdebug DLLs that might be in their subfolders
+        $patterns = @("*luaclient*.dll", "*speedhack*.dll", "*vehdebug*.dll", "*DataCollector*.dll", "*DataCollector*.exe")
+        
+        foreach ($pattern in $patterns) {
+            Get-ChildItem -Path $ce -Recurse -Filter $pattern | Where-Object { $_.FullName -notmatch "\\bin\\" } | ForEach-Object {
+                Write-Host "Found $($_.Name) at $($_.DirectoryName), copying to bin..."
+                Copy-Item $_.FullName $binDir -Force
+            }
         }
       shell: pwsh
 
     - name: Rename Main EXEs and Binary Patch
       run: |
         $binPath = Join-Path $env:PROJECT_DIR "bin"
-        if (-not (Test-Path $binPath)) { throw "Bin folder not found" }
         cd $binPath
 
+        # Rename EXEs
         Get-ChildItem -Filter "cheatengine*.exe" | ForEach-Object {
             $newName = $_.Name -replace "cheatengine", "nocishappytool"
             Rename-Item $_.FullName $newName
         }
 
+        # Binary Patch
         function Replace-Bytes {
             param ([byte[]]$Bytes, [string]$OldStr, [string]$NewStr)
             $oldB = [System.Text.Encoding]::ASCII.GetBytes($OldStr); $newB_raw = [System.Text.Encoding]::ASCII.GetBytes($NewStr)
@@ -154,5 +164,5 @@ jobs:
           $binFiles = Join-Path $env:PROJECT_DIR "bin\*"
           7z a nocishappytool-full.zip $binFiles
           $tag = "7.5.0.${{ github.run_number }}"
-          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Full build with DotNetInvasive (AnyCPU) and MSBuild switches fixed."
+          gh release create $tag .\nocishappytool-full.zip --title "Build $tag" --notes "Fixed missing DLLs by adding Consolidation step."
       shell: pwsh
